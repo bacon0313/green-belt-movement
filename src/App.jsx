@@ -676,14 +676,16 @@ function addContribution(player, score, contributions = {}) {
   Object.entries(contributions).forEach(([key, amount]) => {
     updatedContributions[key] = Number(updatedContributions[key] || 0) + Number(amount || 0)
   })
+  const updatedScore = Number(player.score ?? player.contributionPoints ?? player.actionCount ?? 0) + score
   return {
-    contributionPoints: Number(player.contributionPoints ?? player.actionCount ?? 0) + score,
+    score: updatedScore,
+    contributionPoints: updatedScore,
     contributions: updatedContributions,
   }
 }
 
 function getContributionScore(player) {
-  return Number(player?.contributionPoints ?? player?.actionCount ?? 0)
+  return Number(player?.score ?? player?.contributionPoints ?? player?.actionCount ?? 0)
 }
 
 function getRankedPlayers(players) {
@@ -1188,6 +1190,7 @@ function PlayerView({ gameState }) {
               deviceTokenHash,
               role: null,
               actionCount: 0,
+              score: 0,
               contributionPoints: 0,
               contributions: {},
               joinedAt: Date.now(),
@@ -1722,13 +1725,15 @@ function PlayerView({ gameState }) {
 
         if (color !== event.targetColor) {
           outcome = 'wrong'
+          const updatedScore = Math.max(0, getContributionScore(currentPlayer) - 2)
           return {
             ...current,
             players: {
               ...current.players,
               [playerId]: {
                 ...currentPlayer,
-                contributionPoints: Math.max(0, getContributionScore(currentPlayer) - 10),
+                score: updatedScore,
+                contributionPoints: updatedScore,
               },
             },
           }
@@ -1748,7 +1753,7 @@ function PlayerView({ gameState }) {
             ...current.players,
             [playerId]: {
               ...currentPlayer,
-              ...addContribution(currentPlayer, 15, { emergencyShields: 1 }),
+              ...addContribution(currentPlayer, 2, { emergencyShields: 1 }),
               actionCount: Number(currentPlayer.actionCount || 0) + 1,
             },
           },
@@ -2384,7 +2389,7 @@ function AdminView({ gameState }) {
           emergency: { ...DEFAULT_EMERGENCY_EVENT },
           players: Object.fromEntries(Object.entries(current.players || {}).map(([playerId, player]) => [
             playerId,
-            { ...player, role: null, situation: null, convinced: false, solutionReceived: false, awakeningProgress: 0, communityPoints: 0, actionCount: 0, contributionPoints: 0, contributions: {}, lastDemandAt: null, lastConcernAt: null, lastPitchAt: null, lastSolutionSentAt: null, lastNurtureAt: null, lastRallyAt: null },
+            { ...player, role: null, situation: null, convinced: false, solutionReceived: false, awakeningProgress: 0, communityPoints: 0, actionCount: 0, score: 0, contributionPoints: 0, contributions: {}, lastDemandAt: null, lastConcernAt: null, lastPitchAt: null, lastSolutionSentAt: null, lastNurtureAt: null, lastRallyAt: null },
           ])),
           phase1: {
             ...DEFAULT_PHASE1_STATE,
@@ -2462,7 +2467,7 @@ function AdminView({ gameState }) {
           petitions: 0,
           players: Object.fromEntries(Object.entries(current.players || {}).map(([playerId, player]) => [
             playerId,
-            { ...player, role: null, situation: null, convinced: false, solutionReceived: false, awakeningProgress: 0, communityPoints: 0, actionCount: 0, contributionPoints: 0, contributions: {}, lastDemandAt: null, lastConcernAt: null, lastPitchAt: null, lastSolutionSentAt: null, lastNurtureAt: null, lastRallyAt: null },
+            { ...player, role: null, situation: null, convinced: false, solutionReceived: false, awakeningProgress: 0, communityPoints: 0, actionCount: 0, score: 0, contributionPoints: 0, contributions: {}, lastDemandAt: null, lastConcernAt: null, lastPitchAt: null, lastSolutionSentAt: null, lastNurtureAt: null, lastRallyAt: null },
           ])),
           rally: { active: false, endsAt: 0 },
           oppositionEvent: null,
