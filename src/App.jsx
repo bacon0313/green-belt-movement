@@ -987,6 +987,7 @@ function PlayerView({ gameState }) {
   const [shieldLockedUntil, setShieldLockedUntil] = useState(0)
   const [shieldFeedback, setShieldFeedback] = useState(null)
   const [shieldSubmitting, setShieldSubmitting] = useState(false)
+  const [shieldStreak, setShieldStreak] = useState(0)
   const shieldLockSeconds = useCountdownUntil(shieldLockedUntil)
   function showFloatingEffect(text, vibrate = true) {
     if (vibrate) vibrateDevice()
@@ -997,6 +998,11 @@ function PlayerView({ gameState }) {
     const timer = window.setTimeout(() => setFloatingEffect(''), 1500)
     return () => window.clearTimeout(timer)
   }, [floatingEffect])
+  useEffect(() => {
+    setShieldStreak(0)
+    setShieldFeedback(null)
+    setShieldLockedUntil(0)
+  }, [gameState.emergency?.active, gameState.emergency?.endsAt])
   const confirmedPlayerRef = useRef(false)
   const rallySeconds = useRallyCountdown(gameState.rally)
   const momentumSeconds = useMomentumCountdown(gameState.phase1?.momentumBoost)
@@ -1705,7 +1711,6 @@ function PlayerView({ gameState }) {
   async function clickEmergencyShield(color) {
     if (!database || !gameState.emergency?.active || shieldLockSeconds > 0 || shieldSubmitting) return
     vibrateDevice()
-    setShieldFeedback(null)
     setShieldSubmitting(true)
     try {
       let outcome = ''
@@ -1752,10 +1757,19 @@ function PlayerView({ gameState }) {
 
       if (!result.committed) return
       if (outcome === 'wrong') {
+        setShieldStreak(0)
         setShieldLockedUntil(Date.now() + 2000)
         setShieldFeedback({ type: 'wrong', text: t('phase1.wrongSignal') })
       } else if (outcome === 'correct') {
-        setShieldFeedback({ type: 'correct', text: t('phase1.shieldCorrectFeedback') })
+        const nextStreak = shieldStreak + 1
+        setShieldStreak(nextStreak)
+        setShieldFeedback({
+          type: 'correct',
+          text: nextStreak > 1
+            ? t('phase1.shieldComboFeedback', { count: nextStreak })
+            : t('phase1.shieldCorrectFeedback'),
+          streak: nextStreak,
+        })
       }
     } catch (shieldError) {
       setShieldFeedback({ type: 'wrong', text: `${t('phase1.emergencyFailed')}: ${shieldError.message}` })
@@ -1955,7 +1969,13 @@ function PlayerView({ gameState }) {
         <p className="mt-2 font-bold">{t('phase1.emergencyProgress', { clicks: gameState.emergency.shieldClicks, target: 80 })}</p>
         <div className="mt-4 h-5 overflow-hidden rounded-full bg-white transition-all duration-300 ease-out"><div className="h-full rounded-full bg-clay transition-all duration-300 ease-out" style={{ width: `${Math.min(100, (gameState.emergency.shieldClicks / 80) * 100)}%` }} /></div>
         <p className="mt-4 rounded-xl bg-amber-100 px-4 py-3 font-black text-amber-950">{t('phase1.shieldLookUp')}</p>
-        {shieldFeedback && <p aria-live="polite" className={`mt-3 rounded-xl px-4 py-3 font-black ${shieldFeedback.type === 'correct' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}`}>{shieldFeedback.text}{shieldLockSeconds > 0 && shieldFeedback.type === 'wrong' ? ` · ${shieldLockSeconds}s` : ''}</p>}
+        <div className="mt-3 h-11 w-full" aria-live="polite" aria-atomic="true">
+          <p key={`${shieldFeedback?.type || 'idle'}-${shieldFeedback?.streak || 0}-${shieldFeedback?.text || ''}`} className={`shield-feedback flex h-11 w-full items-center justify-center overflow-hidden rounded-xl px-2 text-center text-xs font-black sm:text-sm ${shieldFeedback?.type === 'correct' ? 'bg-green-100 text-green-800' : shieldFeedback?.type === 'wrong' ? 'bg-red-100 text-red-700' : 'bg-amber-50 text-amber-900/70'}`}>
+            {shieldFeedback
+              ? `${shieldFeedback.text}${shieldLockSeconds > 0 && shieldFeedback.type === 'wrong' ? ` · ${shieldLockSeconds}s` : ''}`
+              : t('phase1.shieldReady')}
+          </p>
+        </div>
         <div className="mt-4 grid grid-cols-2 gap-3">{[['RED','bg-red-500'],['BLUE','bg-blue-600'],['YELLOW','bg-yellow-400'],['GREEN','bg-green-600']].map(([color, style]) => <button className={`min-h-[3.25rem] rounded-2xl px-4 py-3 text-lg font-black text-white ${style}`} disabled={shieldLockSeconds > 0 || shieldSubmitting} key={color} onClick={() => clickEmergencyShield(color)} type="button">{t(`phase1.shield.${color.toLowerCase()}`)}</button>)}</div>
       </section>}
 

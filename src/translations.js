@@ -388,7 +388,9 @@ const translations = {
       emergencyTitle: '15s Emergency: Forest Shield',
       pressColor: 'PRESS {color} SHIELD!',
       shieldLookUp: '👀 Look up at the Screen for the target color!',
+      shieldReady: 'Ready to press the matching color...',
       shieldCorrectFeedback: '+15 pts!',
+      shieldComboFeedback: '+15 pts! (Combo x{count})',
       wrongSignal: 'Wrong color! Look up at the Screen.',
       shield: {
         red: 'RED',
@@ -796,7 +798,9 @@ const translations = {
       emergencyTitle: '15 秒緊急危機：森林護盾',
       pressColor: '請按下 {color} 護盾！',
       shieldLookUp: '👀 抬頭看大螢幕（Screen）顯示的顏色！',
+      shieldReady: '準備點擊對應顏色⋯',
       shieldCorrectFeedback: '+15 pts!',
+      shieldComboFeedback: '+15 pts!（連擊 x{count}）',
       wrongSignal: '按錯顏色！請抬頭看大螢幕',
       shield: {
         red: '紅色',
