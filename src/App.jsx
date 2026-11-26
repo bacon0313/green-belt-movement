@@ -126,6 +126,19 @@ function normalizeNickname(nickname) {
   return String(nickname || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+async function getOrCreateDeviceTokenHash() {
+  const storageKey = 'gbm-device-token'
+  let token = window.localStorage.getItem(storageKey)
+  if (!token) {
+    token = window.crypto.randomUUID
+      ? window.crypto.randomUUID()
+      : Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    window.localStorage.setItem(storageKey, token)
+  }
+  const digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 const DEFAULT_GAME_STATE = {
   apModelVersion: AP_MODEL_VERSION,
   phase: 'LOBBY',
@@ -202,7 +215,6 @@ const OBSERVER_NEEDS = [
   { id: 'FIREWOOD', titleKey: 'needFirewood' },
   { id: 'PARK', titleKey: 'needPark' },
 ]
-const CAMPAIGN_WORDS = ['FOREST', 'WATER', 'KENYA', 'PLANT', 'EARTH', 'PEACE', 'SPACE', 'VOICE', 'ACTION', 'CHANGE', 'UNITY', 'SOIL', 'GROW', 'HOPE', 'GREEN']
 const HISTORY_TRIVIA = [
   { id: 'main-action', answer: 'A', options: ['A', 'B', 'C', 'D'] },
   { id: 'tree-benefits', answer: 'A', options: ['A', 'B', 'C', 'D'] },
@@ -226,19 +238,6 @@ function drawHistoryQuestion(usedIds = [], lastId = '') {
   return pool[Math.floor(Math.random() * pool.length)]
 }
 
-function shuffleLetters(word) {
-  const letters = word.split('')
-  for (let index = letters.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1))
-    ;[letters[index], letters[swapIndex]] = [letters[swapIndex], letters[index]]
-  }
-  return letters.join(' ')
-}
-
-function createCampaignQuestion() {
-  const answer = CAMPAIGN_WORDS[Math.floor(Math.random() * CAMPAIGN_WORDS.length)]
-  return { answer, letters: shuffleLetters(answer) }
-}
 const PHASE_2_PHASES = ['PHASE_2_ROUND_1', 'PHASE_2_ROUND_2', 'PHASE_2_ROUND_3']
 const ALLOCATION_ITEMS = [
   { id: 'plantTrees', labelKey: 'plantTrees' },
@@ -966,10 +965,6 @@ function PlayerView({ gameState }) {
   const [playerId, setPlayerId] = useState(() => window.sessionStorage.getItem('gbm-player-id') || '')
   const [error, setError] = useState('')
   const [selectedRole, setSelectedRole] = useState('')
-  const [campaignOpen, setCampaignOpen] = useState(false)
-  const [campaignAnswer, setCampaignAnswer] = useState('')
-  const [campaignMessage, setCampaignMessage] = useState('')
-  const [campaignQuestion, setCampaignQuestion] = useState(createCampaignQuestion)
   const [plantingStep, setPlantingStep] = useState(1)
   const [absorptionStartedAt, setAbsorptionStartedAt] = useState(0)
   const [absorptionDuration, setAbsorptionDuration] = useState(2000)
@@ -990,6 +985,8 @@ function PlayerView({ gameState }) {
   const [selectedObserverId, setSelectedObserverId] = useState('')
   const [pitchFeedback, setPitchFeedback] = useState('')
   const [shieldLockedUntil, setShieldLockedUntil] = useState(0)
+  const [shieldFeedback, setShieldFeedback] = useState(null)
+  const [shieldSubmitting, setShieldSubmitting] = useState(false)
   const shieldLockSeconds = useCountdownUntil(shieldLockedUntil)
   function showFloatingEffect(text, vibrate = true) {
     if (vibrate) vibrateDevice()
@@ -1063,6 +1060,7 @@ function PlayerView({ gameState }) {
   const actionRoleCapacity = actionRoleIds.reduce((total, role) => total + Number(phase1State.roleLimits?.[role] ?? 0), 0)
   const actionRoleCount = actionRoleIds.reduce((total, role) => total + Number(roleCounts[role] || 0), 0)
   const eligibleObservers = Object.entries(gameState.players || {}).filter(([, entry]) => entry.role === 'Observer' && !entry.convinced)
+  const remainingObservers = Object.entries(gameState.players || {}).filter(([, entry]) => entry.role === 'Observer')
   const observerCounts = SURVIVAL_SITUATIONS.reduce((counts, item) => ({
     ...counts,
     [item.id]: Object.values(gameState.players || {}).filter((entry) => entry.role === 'Observer' && entry.situation === item.id && !entry.convinced).length,
@@ -1136,23 +1134,43 @@ function PlayerView({ gameState }) {
     if (!database) return setError(t('common.firebaseNotConnected'))
 
     try {
+      const deviceTokenHash = await getOrCreateDeviceTokenHash()
+      const previousPlayerId = window.sessionStorage.getItem('gbm-player-id')
       const playerRef = push(ref(database, 'gameState/players'))
       const newPlayerId = playerRef.key
       if (!newPlayerId) throw new Error(t('player.unableToJoin'))
 
       let duplicateNickname = false
       let lobbyUnavailable = false
+      let restoredPlayerId = ''
       const result = await runTransaction(ref(database, 'gameState'), (current) => {
-        if (!current || current.phase !== 'LOBBY') {
-          lobbyUnavailable = true
+        duplicateNickname = false
+        lobbyUnavailable = false
+        restoredPlayerId = ''
+        if (!current) return undefined
+        const normalizedName = normalizeNickname(cleanName)
+        const existingEntry = Object.entries(current.players || {}).find(
+          ([, existingPlayer]) => normalizeNickname(existingPlayer?.nickname) === normalizedName,
+        )
+        if (existingEntry) {
+          const [existingId, existingPlayer] = existingEntry
+          if (existingPlayer.deviceTokenHash === deviceTokenHash || existingId === previousPlayerId) {
+            restoredPlayerId = existingId
+            return existingPlayer.deviceTokenHash === deviceTokenHash
+              ? current
+              : {
+                  ...current,
+                  players: {
+                    ...current.players,
+                    [existingId]: { ...existingPlayer, deviceTokenHash },
+                  },
+                }
+          }
+          duplicateNickname = true
           return undefined
         }
-        const normalizedName = normalizeNickname(cleanName)
-        const isTaken = Object.values(current.players || {}).some(
-          (existingPlayer) => normalizeNickname(existingPlayer?.nickname) === normalizedName,
-        )
-        if (isTaken) {
-          duplicateNickname = true
+        if (current.phase !== 'LOBBY') {
+          lobbyUnavailable = true
           return undefined
         }
         return {
@@ -1161,6 +1179,7 @@ function PlayerView({ gameState }) {
             ...(current.players || {}),
             [newPlayerId]: {
               nickname: cleanName,
+              deviceTokenHash,
               role: null,
               actionCount: 0,
               contributionPoints: 0,
@@ -1177,8 +1196,9 @@ function PlayerView({ gameState }) {
         return setError(t('player.unableToJoin'))
       }
 
-      window.sessionStorage.setItem('gbm-player-id', newPlayerId)
-      setPlayerId(newPlayerId)
+      const joinedPlayerId = restoredPlayerId || newPlayerId
+      window.sessionStorage.setItem('gbm-player-id', joinedPlayerId)
+      setPlayerId(joinedPlayerId)
       setError('')
     } catch (joinError) {
       setError(`${t('player.unableToJoin')}: ${joinError.message}`)
@@ -1683,31 +1703,65 @@ function PlayerView({ gameState }) {
   }
 
   async function clickEmergencyShield(color) {
-    if (!database || !gameState.emergency?.active || shieldLockSeconds > 0) return
-    if (color !== gameState.emergency.targetColor) {
-      const lockedUntil = Date.now() + 2000
-      setShieldLockedUntil(lockedUntil)
-      setError(t('phase1.wrongSignal'))
-      vibrateDevice()
-      return
-    }
+    if (!database || !gameState.emergency?.active || shieldLockSeconds > 0 || shieldSubmitting) return
     vibrateDevice()
-    await runTransaction(ref(database, 'gameState'), (current) => {
-      const event = mergeEmergencyEvent(current?.emergency)
-      if (current?.phase !== 'PHASE_1' || !event.active || Date.now() >= event.endsAt) return current
-      const pactLevel = Number(mergeUpgrades(current.upgrades).organizerPact.level || 0)
-      const clicks = Number(event.shieldClicks || 0) + 1 + pactLevel
-      return {
-        ...current,
-        emergency: {
-          ...event,
-          shieldClicks: clicks,
-          active: clicks < 80,
-          resolved: clicks >= 80 ? 'success' : null,
-        },
+    setShieldFeedback(null)
+    setShieldSubmitting(true)
+    try {
+      let outcome = ''
+      const result = await runTransaction(ref(database, 'gameState'), (current) => {
+        outcome = ''
+        const event = mergeEmergencyEvent(current?.emergency)
+        const currentPlayer = current?.players?.[playerId]
+        if (current?.phase !== 'PHASE_1' || !event.active || Date.now() >= Number(event.endsAt) || !currentPlayer) return undefined
+
+        if (color !== event.targetColor) {
+          outcome = 'wrong'
+          return {
+            ...current,
+            players: {
+              ...current.players,
+              [playerId]: {
+                ...currentPlayer,
+                contributionPoints: Math.max(0, getContributionScore(currentPlayer) - 10),
+              },
+            },
+          }
+        }
+
+        outcome = 'correct'
+        const clicks = Number(event.shieldClicks || 0) + 1
+        return {
+          ...current,
+          emergency: {
+            ...event,
+            shieldClicks: clicks,
+            active: clicks < 80,
+            resolved: clicks >= 80 ? 'success' : null,
+          },
+          players: {
+            ...current.players,
+            [playerId]: {
+              ...currentPlayer,
+              ...addContribution(currentPlayer, 15, { emergencyShields: 1 }),
+              actionCount: Number(currentPlayer.actionCount || 0) + 1,
+            },
+          },
+        }
+      })
+
+      if (!result.committed) return
+      if (outcome === 'wrong') {
+        setShieldLockedUntil(Date.now() + 2000)
+        setShieldFeedback({ type: 'wrong', text: t('phase1.wrongSignal') })
+      } else if (outcome === 'correct') {
+        setShieldFeedback({ type: 'correct', text: t('phase1.shieldCorrectFeedback') })
       }
-    }).catch(() => {})
-    setError('')
+    } catch (shieldError) {
+      setShieldFeedback({ type: 'wrong', text: `${t('phase1.emergencyFailed')}: ${shieldError.message}` })
+    } finally {
+      setShieldSubmitting(false)
+    }
   }
 
   function openHistoryQuiz() {
@@ -1784,58 +1838,6 @@ function PlayerView({ gameState }) {
       }
     } catch (quizError) {
       setHistoryFeedback({ type: 'wrong', text: `${t('phase1.historyQuizFailed')}: ${quizError.message}` })
-    }
-  }
-
-  async function submitCampaign(event) {
-    event.preventDefault()
-    if (campaignCooldownSeconds > 0) return
-    if (campaignAnswer.trim().toUpperCase() !== campaignQuestion.answer) {
-      setCampaignMessage(t('player.notQuite', { letters: campaignQuestion.letters }))
-      return
-    }
-    try {
-      const result = await runTransaction(ref(database, 'gameState'), (current) => {
-        const currentPlayer = current?.players?.[playerId]
-        if (current?.phase !== 'PHASE_1' || !currentPlayer || currentPlayer.role !== 'Publicity Campaigner') return undefined
-        const currentWaveRules = getPhase1WaveRules(current.phase1?.substage)
-        const cooldownMs = getActionCooldownMs(
-          currentWaveRules.campaignCooldownMs,
-          Number(current.phase1?.boostExpiresAt || 0) > Date.now()
-            && current.rally?.startedBy !== playerId,
-        )
-        if (Date.now() - Number(currentPlayer.lastSolutionSentAt || 0) < cooldownMs) return undefined
-        const levels = mergeRoleLevels(current.roleLevels)
-        const upgrades = mergeUpgrades(current.upgrades)
-        const signatures = 5 + Number(upgrades.campaignerMegaphone.level || 0) * 12
-        const mediaLevel = Number(upgrades.campaignerMedia.level || 0)
-        const extraAP = mediaLevel > 0 && Math.random() < mediaLevel * 0.25 ? 1 : 0
-        return {
-          ...current,
-          petitions: Number(current.petitions || 0) + signatures,
-          organizationAP: adjustRoleAP(current.organizationAP, 'Publicity Campaigner', 1 + extraAP),
-          players: {
-            ...current.players,
-            [playerId]: {
-              ...currentPlayer,
-              ...addContribution(currentPlayer, 1, { signatures }),
-              lastSolutionSentAt: Date.now(),
-              actionCount: Number(currentPlayer.actionCount || 0) + 1,
-            },
-          },
-        }
-      })
-      if (!result.committed) {
-        setCampaignMessage(t('player.unableToAddSignatures'))
-        return
-      }
-      setCampaignMessage(t('player.correct'))
-      setCampaignAnswer('')
-      setCampaignQuestion(createCampaignQuestion())
-      setCampaignOpen(false)
-      showFloatingEffect('+1 Group AP')
-    } catch (campaignError) {
-      setCampaignMessage(`${t('player.unableToAddSignatures')}: ${campaignError.message}`)
     }
   }
 
@@ -1947,7 +1949,15 @@ function PlayerView({ gameState }) {
         <p className="mt-4 rounded-xl bg-cream px-4 py-3 text-sm font-bold text-forest/70">{t(`phase1.${phase1State.substage === 'WAVE_1' ? 'waveOneRule' : phase1State.substage === 'WAVE_2' ? 'waveTwoRule' : 'waveThreeRule'}`)}</p>
       </section>
       {phase1State.substage === 'WAVE_3' && <div className="rounded-2xl bg-clay px-5 py-4 text-center font-black text-white">{t('phase1.finalPush')}</div>}
-      {gameState.emergency?.active && <section className="card border-2 border-clay bg-orange-50 text-center"><p className="text-sm font-black uppercase tracking-widest text-clay">{t('phase1.emergencyTitle')}</p><h3 className="mt-2 text-3xl font-black text-clay">{emergencySeconds}s</h3><p className="mt-2 font-bold">{t('phase1.emergencyProgress', { clicks: gameState.emergency.shieldClicks, target: 80 })}</p><div className="mt-4 h-5 overflow-hidden rounded-full bg-white transition-all duration-300 ease-out"><div className="h-full rounded-full bg-clay transition-all duration-300 ease-out" style={{ width: `${Math.min(100, (gameState.emergency.shieldClicks / 80) * 100)}%` }} /></div>{shieldLockSeconds > 0 ? <p className="mt-4 rounded-xl bg-red-50 py-3 font-black text-red-600">{t('phase1.wrongSignal')} · {shieldLockSeconds}s</p> : <div className="mt-4 grid grid-cols-2 gap-3">{[['RED','bg-red-500'],['BLUE','bg-blue-600'],['YELLOW','bg-yellow-400'],['GREEN','bg-green-600']].map(([color, style]) => <button className={`min-h-[3.25rem] rounded-2xl px-4 py-3 text-lg font-black text-white ${style}`} disabled={shieldLockSeconds > 0} key={color} onClick={() => clickEmergencyShield(color)} type="button">{t(`phase1.shield.${color.toLowerCase()}`)}</button>)}</div>}</section>}
+      {gameState.emergency?.active && <section className="card border-2 border-clay bg-orange-50 text-center">
+        <p className="text-sm font-black uppercase tracking-widest text-clay">{t('phase1.emergencyTitle')}</p>
+        <h3 className="mt-2 text-3xl font-black text-clay">{emergencySeconds}s</h3>
+        <p className="mt-2 font-bold">{t('phase1.emergencyProgress', { clicks: gameState.emergency.shieldClicks, target: 80 })}</p>
+        <div className="mt-4 h-5 overflow-hidden rounded-full bg-white transition-all duration-300 ease-out"><div className="h-full rounded-full bg-clay transition-all duration-300 ease-out" style={{ width: `${Math.min(100, (gameState.emergency.shieldClicks / 80) * 100)}%` }} /></div>
+        <p className="mt-4 rounded-xl bg-amber-100 px-4 py-3 font-black text-amber-950">{t('phase1.shieldLookUp')}</p>
+        {shieldFeedback && <p aria-live="polite" className={`mt-3 rounded-xl px-4 py-3 font-black ${shieldFeedback.type === 'correct' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'}`}>{shieldFeedback.text}{shieldLockSeconds > 0 && shieldFeedback.type === 'wrong' ? ` · ${shieldLockSeconds}s` : ''}</p>}
+        <div className="mt-4 grid grid-cols-2 gap-3">{[['RED','bg-red-500'],['BLUE','bg-blue-600'],['YELLOW','bg-yellow-400'],['GREEN','bg-green-600']].map(([color, style]) => <button className={`min-h-[3.25rem] rounded-2xl px-4 py-3 text-lg font-black text-white ${style}`} disabled={shieldLockSeconds > 0 || shieldSubmitting} key={color} onClick={() => clickEmergencyShield(color)} type="button">{t(`phase1.shield.${color.toLowerCase()}`)}</button>)}</div>
+      </section>}
 
       <section className="card">
         <p className="text-sm text-forest/60">{t('player.yourRole')}</p>
@@ -1977,11 +1987,12 @@ function PlayerView({ gameState }) {
         <p className="mt-2 text-sm text-forest/70">{campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0 ? t('phase1.cooldownRemaining', { seconds: Math.max(campaignCooldownSeconds, pitchCooldownSeconds) }) : t('phase1.campaignCooldown', { seconds: waveRules.campaignCooldownMs / 1000 })}</p>
         {eligibleObservers.length > 0 ? (
           <>
+            <p className="mt-4 text-sm font-bold text-forest/70">{t('phase1.selectObserverFirst')}</p>
             <div className="mt-4 space-y-2">
               {eligibleObservers.map(([observerId, observer]) => {
   const needJustChanged = Date.now() - Number(observer.needChangedAt || 0) < 1000
   return (
-    <button className={`flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedObserverId === observerId ? 'border-leaf bg-moss' : 'border-forest/10 bg-cream'}`} key={observerId} onClick={() => { setSelectedObserverId(observerId); setPitchFeedback('') }} type="button">
+    <button aria-pressed={selectedObserverId === observerId} className={`flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedObserverId === observerId ? 'border-leaf bg-moss' : 'border-forest/10 bg-cream'}`} key={observerId} onClick={() => { setSelectedObserverId(observerId); setPitchFeedback('') }} type="button">
       <span>
         <span className="block font-black">{observer.nickname}</span>
         <span className={`mt-1 inline-block rounded-full px-2 py-1 text-xs text-forest/70 ${needJustChanged ? 'need-refresh' : ''}`}>{observer.needType === 'WATER' ? t('phase1.needWater') : observer.needType === 'FIREWOOD' ? t('phase1.needFirewood') : t('phase1.needPark')}</span>
@@ -1993,26 +2004,27 @@ function PlayerView({ gameState }) {
 })}
             </div>
             <div className="mt-5 grid grid-cols-1 gap-2">
-              <button className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 font-bold disabled:opacity-40" disabled={campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('WATER')} type="button">{t('phase1.pitchWater')}</button>
-              <button className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 font-bold disabled:opacity-40" disabled={campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('FIREWOOD')} type="button">{t('phase1.pitchFirewood')}</button>
-              <button className="rounded-xl border border-leaf/30 bg-moss px-4 py-3 font-bold disabled:opacity-40" disabled={campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('PARK')} type="button">{t('phase1.pitchPark')}</button>
+              <button className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 font-bold disabled:opacity-40" disabled={!eligibleObservers.some(([observerId]) => observerId === selectedObserverId) || campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('WATER')} type="button">{t('phase1.pitchWater')}</button>
+              <button className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 font-bold disabled:opacity-40" disabled={!eligibleObservers.some(([observerId]) => observerId === selectedObserverId) || campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('FIREWOOD')} type="button">{t('phase1.pitchFirewood')}</button>
+              <button className="rounded-xl border border-leaf/30 bg-moss px-4 py-3 font-bold disabled:opacity-40" disabled={!eligibleObservers.some(([observerId]) => observerId === selectedObserverId) || campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={() => pitchObserver('PARK')} type="button">{t('phase1.pitchPark')}</button>
             </div>
           </>
-        ) : (
+        ) : remainingObservers.length === 0 ? (
           <button className="mt-5 w-full rounded-2xl border-2 border-yellow-400 bg-gradient-to-br from-yellow-100 to-amber-300 px-5 py-5 text-left shadow-lg transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-50" disabled={campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0} onClick={launchMassPetitionRally} type="button">
             <span className="block text-lg font-black text-amber-950">{t('phase1.massPetitionRally')}</span>
             <span className="mt-2 block text-sm font-bold text-amber-900/80">{t('phase1.massRallyDescription')}</span>
             {(campaignCooldownSeconds > 0 || pitchCooldownSeconds > 0) && <span className="mt-2 block text-sm font-black text-amber-950">{t('phase1.cooldownRemaining', { seconds: Math.max(campaignCooldownSeconds, pitchCooldownSeconds) })}</span>}
           </button>
+        ) : (
+          <p className="mt-5 rounded-xl bg-cream px-4 py-4 text-center text-sm font-bold text-forest/70">{t('phase1.observersChoosingRoles')}</p>
         )}
         {pitchFeedback && <p className={`mt-4 border-l-4 py-2 pl-3 text-sm font-black ${pitchFeedback === t('phase1.matchedNeed') || pitchFeedback === t('phase1.massRallySuccess') ? 'border-leaf text-leaf' : 'border-red-500 text-red-600'}`}>{pitchFeedback}</p>}
         {phase1State.bulldozer?.active && <div className="mt-5 rounded-2xl border border-clay/30 bg-orange-50 p-4"><p className="font-black text-clay">{t('phase1.bulldozer')}</p><p className="mt-1 text-sm text-forest/70">{t('phase1.bulldozerDescription')}</p><p className="mt-2 font-black text-clay">{t('phase1.truthProgress', { count: phase1State.bulldozer.truthExposes })}</p><button className="mt-3 w-full rounded-xl bg-clay px-4 py-3 font-bold text-white hover:bg-forest" onClick={exposeTruth}>{t('phase1.exposeTruth')}</button></div>}
       </section>}
-      {currentRole === 'Publicity Campaigner' && <section className="card"><h3 className="text-xl font-black">{t('player.speechTitle')}</h3><p className="mt-2 text-sm text-forest/70">{t('player.speechDescription')}</p>{campaignCooldownSeconds > 0 && <p className="mt-2 text-sm font-bold text-clay">{t('phase1.cooldownRemaining', { seconds: campaignCooldownSeconds })}</p>}<button className="mt-5 w-full rounded-2xl bg-clay px-4 py-5 text-lg font-black text-white hover:bg-forest disabled:opacity-40" disabled={campaignCooldownSeconds > 0} onClick={() => setCampaignOpen(true)}>{t('player.giveSpeech')}</button>{campaignOpen && <form className="mt-4 space-y-3" onSubmit={submitCampaign}><label className="block text-sm font-bold" htmlFor="campaign-answer">{t('player.unscramble', { letters: campaignQuestion.letters })}</label><input id="campaign-answer" className="w-full rounded-xl border border-forest/15 bg-cream px-4 py-3" onChange={(event) => setCampaignAnswer(event.target.value)} placeholder={t('player.typeWord')} value={campaignAnswer} /><button className="w-full rounded-xl bg-forest px-4 py-3 font-bold text-white disabled:opacity-40" disabled={campaignCooldownSeconds > 0} type="submit">{t('player.submitAnswer')}</button></form>}{campaignMessage && <p className="mt-3 text-sm font-bold text-leaf">{campaignMessage}</p>}</section>}
       <section className="card">
         <div className="flex items-start justify-between gap-3">
           <div><h3 className="text-xl font-black">{t('phase1.historyQuiz')}</h3><p className="mt-1 text-sm text-forest/70">{t('phase1.historyQuizDescription')}</p></div>
-          <span className="text-2xl">📜</span>
+          <span className="text-2xl">🌱</span>
         </div>
         <button className="mt-4 w-full rounded-2xl bg-forest px-4 py-4 font-black text-white hover:bg-leaf disabled:cursor-not-allowed disabled:opacity-40" disabled={historyQuizCooldownSeconds > 0 || historyQuizOpen} onClick={openHistoryQuiz}>
           {historyQuizOpen ? t('phase1.historyQuestionOpen') : historyQuizCooldownSeconds > 0 ? t('phase1.historyCooldown', { seconds: historyQuizCooldownSeconds }) : t('phase1.historyQuiz')}
